@@ -364,8 +364,9 @@ void shard_connection::push_req(request* req) {
     m_pipeline->push(req);
     m_pending_resp++;
     if (m_config->request_rate) {
-        assert(m_request_per_cur_interval > 0);
-        m_request_per_cur_interval--;
+        if (m_request_per_cur_interval > 0) {
+            m_request_per_cur_interval--;
+        }
     }
 }
 
@@ -532,7 +533,7 @@ void shard_connection::fill_pipeline(void)
 
         // that's enough, we reached the rate limit
         if (m_config->request_rate && m_request_per_cur_interval == 0) {
-            // return and skip on update events
+            // Keep the connection enabled but don't send more requests this interval
             return;
         }
 
@@ -545,9 +546,13 @@ void shard_connection::fill_pipeline(void)
         // no pending response (nothing to read) and output buffer empty (nothing to write)
         if ((m_pending_resp == 0) && (evbuffer_get_length(bufferevent_get_output(m_bev)) == 0)) {
             benchmark_debug_log("%s Done, no requests to send no response to wait for\n", get_readable_id());
-            bufferevent_disable(m_bev, EV_WRITE|EV_READ);
-            if (m_config->request_rate) {
-                event_del(m_event_timer);
+            // Only disable the connection if we're not in the process of receiving responses
+            if (evbuffer_get_length(bufferevent_get_input(m_bev)) == 0) {
+                bufferevent_disable(m_bev, EV_WRITE|EV_READ);
+                if (m_conns_manager->finished()) {
+                    // If we're done with the benchmark, stop the timer
+                    event_del(m_event_timer);
+                }
             }
         }
     }
@@ -608,6 +613,11 @@ void shard_connection::handle_event(short events)
 }
 
 void shard_connection::handle_timer_event() {
+    if (m_conns_manager->finished()) {
+        // If we're done with the benchmark, stop the timer
+        event_del(m_event_timer);
+        return;
+    }
     m_request_per_cur_interval = m_config->request_per_interval;
     fill_pipeline();
 }
